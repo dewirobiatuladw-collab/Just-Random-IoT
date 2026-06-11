@@ -1,0 +1,100 @@
+#include <Keypad.h>
+
+#define RELAY_PIN  RX  // Pin D8 untuk relay yang dikontrol oleh keypad
+#define BUTTON_PIN TX   // Pin D0 untuk tombol dengan logika pull-up
+#define LED_OFF D0  // Pin RX untuk LED merah
+#define LED_ON D8
+
+#define ROW_NUM    4   // 4 rows
+#define COLUMN_NUM 3   // 3 columns
+
+// Keypad configuration
+char key_layout[ROW_NUM][COLUMN_NUM] = {
+  {'1','2','3'},
+  {'4','5','6'},
+  {'7','8','9'},
+  {'*','0','#'}
+};
+
+byte pin_rows[ROW_NUM] = {D1, D2, D3, D4};  // ESP8266 pins connect to row pins
+byte pin_column[COLUMN_NUM] = {D5, D6, D7}; // ESP8266 pins connect to column pins
+
+Keypad keypad = Keypad(makeKeymap(key_layout), pin_rows, pin_column, ROW_NUM, COLUMN_NUM);
+
+// Password configuration
+const String password_1 = "1507"; // Change your password here
+String input_password;
+
+// Variables for button-based relay control
+unsigned long lastButtonPressTime = 0; // Time when button was last pressed
+bool relayButtonActive = false;        // Status of button-controlled relay
+
+void setup() {
+  Serial.begin(115200);
+  input_password.reserve(32); // Maximum input characters is 32
+
+  // Pin configurations
+  pinMode(RELAY_PIN, OUTPUT); 
+  pinMode(BUTTON_PIN, INPUT_PULLUP); 
+  pinMode(LED_OFF, OUTPUT);
+  pinMode(LED_ON, OUTPUT);
+  digitalWrite(LED_OFF, HIGH);
+  digitalWrite(LED_ON, LOW);
+  // Ensure relays are off at the start
+  digitalWrite(RELAY_PIN, HIGH); 
+}
+
+void loop() {
+  // ============================
+  // Logic 1: Keypad-controlled relay
+  // ============================
+  char key = keypad.getKey();
+
+  if (key) {
+    Serial.println(key);
+
+    if (key == '*') {
+      input_password = ""; // Reset the input password
+    } else if (key == '#') {
+      if (input_password == password_1) {
+        Serial.println("Valid Password => Unlock the door");
+        digitalWrite(RELAY_PIN, LOW);  // Unlock the door for 5 seconds
+        digitalWrite(LED_OFF, LOW);
+        digitalWrite(LED_ON, HIGH);
+        delay(5000);
+        digitalWrite(RELAY_PIN, HIGH); // Lock the door
+        digitalWrite(LED_OFF, HIGH);
+        digitalWrite(LED_ON, LOW);
+      } else {
+        Serial.println("Invalid Password => Try again");
+      }
+
+      input_password = ""; // Reset the input password
+    } else {
+      input_password += key; // Append new character to input password string
+    }
+  }
+
+  // // ============================
+  // Logic 2: Button-controlled relay
+  // ============================
+  int buttonState = digitalRead(BUTTON_PIN); // Read button state
+
+  if (buttonState == LOW && !relayButtonActive) { // Button pressed (LOW = active)
+    digitalWrite(RELAY_PIN, LOW); // Activate relay
+    digitalWrite(LED_OFF, LOW);
+    digitalWrite(LED_ON, HIGH);
+    delay(5000);
+    digitalWrite(RELAY_PIN, HIGH); // Activate relay
+    digitalWrite(LED_OFF, HIGH);
+    digitalWrite(LED_ON, LOW);
+    lastButtonPressTime = millis(); // Record the time button was pressed
+    relayButtonActive = true; // Mark relay as active
+  }
+
+  // If relay is active and active time exceeds 10 seconds
+  if (relayButtonActive && (millis() - lastButtonPressTime >= 3000)) {
+    digitalWrite(RELAY_PIN, HIGH); // Deactivate relay
+    relayButtonActive = false; // Reset relay active status
+  }
+}

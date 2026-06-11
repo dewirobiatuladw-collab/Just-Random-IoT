@@ -1,0 +1,227 @@
+#include <ESP8266WiFi.h>
+#include <espnow.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+
+const char *ssid = "WIFI NAME";     // Nama Wi-Fi yang akan digunakan
+const char *password = "Wifi password";   // Password Wi-Fi
+
+
+WiFiUDP ntp; // Objek untuk protokol NTP (Network Time Protocol)
+NTPClient waktu8266(ntp, "pool.ntp.org"); // Inisialisasi NTP client dengan server waktu "pool.ntp.org"
+
+// Nama hari dan bulan dalam bahasa Indonesia
+String hari[7] = {"Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jum'at", "Sabtu"};
+String bulan[12] = {"Januari", "Pebruari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"};
+
+// Pin untuk kontrol ESP-NOW
+#define PIN1 5   // GPIO 5 untuk kontrol PIN1 SIRINE LASER
+#define PIN2 4   // GPIO 14 untuk kontrol PIN2 BUZZER GERBANG
+#define PIN3 2   // D6 untuk bel
+
+// Struktur data untuk komunikasi ESP-NOW
+typedef struct struct_message {
+  char a[64];  // Pesan untuk kontrol PIN1
+  char b[32];  // Pesan untuk kontrol PIN2
+} struct_message;
+
+struct_message myData; // Objek data untuk menerima pesan ESP-NOW
+
+// Variabel global untuk melacak status kontrol
+bool isGateOpen = false;  // Status PIN2 apakah aktif sebelumnya
+bool isPin1High = false;    // Status PIN1 apakah HIGH sebelumnya
+bool isPin3On = false;     // status PIN3 apakah ON sebelumnya 
+
+// Variabel untuk melacak urutan pesan
+String lastReceivedMessage = "";  // Pesan terakhir yang diterima
+unsigned long lastReceivedTime = 0; // Waktu pesan terakhir diterima
+unsigned long lastMillisPin2 = 0; // Variabel untuk mencatat waktu aktif PIN2
+
+// Callback ESP-NOW ketika data diterima
+void OnDataRecv(uint8_t *mac, uint8_t *incomingData, uint8_t len) {
+  memcpy(&myData, incomingData, sizeof(myData)); // Salin data yang diterima ke objek myData
+  Serial.print("Bytes received: ");
+  Serial.println(len);
+
+  Serial.print("Message A: ");
+  Serial.println(myData.a); // Tampilkan pesan untuk PIN1
+
+  Serial.print("Message B: ");
+  Serial.println(myData.b); // Tampilkan pesan untuk PIN2
+}
+
+void setup() {
+  // Inisialisasi Serial Monitor
+  Serial.begin(115200);
+  waktu8266.setTimeOffset(25200); // GMT+7 untuk WIB (7 jam di depan UTC)
+
+  // Atur PIN1 dan PIN2 sebagai output
+  pinMode(PIN1, OUTPUT);
+  pinMode(PIN2, OUTPUT);
+  pinMode(PIN3, OUTPUT);
+  digitalWrite(PIN1, LOW); // Set PIN1 ke LOW (awal)
+  digitalWrite(PIN2, LOW); // Set PIN2 ke LOW (awal)
+  digitalWrite(PIN3, LOW);
+
+  // Inisialisasi ESP-NOW
+  WiFi.mode(WIFI_STA); // Atur mode Wi-Fi sebagai Station
+  if (esp_now_init() != 0) {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+  esp_now_set_self_role(ESP_NOW_ROLE_SLAVE); // Atur perangkat sebagai slave ESP-NOW
+  esp_now_register_recv_cb(OnDataRecv); // Daftarkan callback untuk menerima data
+}
+
+// Fungsi untuk memastikan Wi-Fi tetap terhubung
+void ensureWiFiConnected() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Reconnecting to WiFi...");
+    WiFi.begin(ssid, password); // Hubungkan ke Wi-Fi
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(200);
+      Serial.print("."); // Indikator proses koneksi
+    }
+    Serial.println("\nWiFi reconnected!");
+  }
+}
+
+// Fungsi untuk mengirim notifikasi ke WhatsApp
+void sendWhatsAppNotification(String message) {
+  ensureWiFiConnected(); // Pastikan Wi-Fi terhubung
+
+  if (WiFi.status() == WL_CONNECTED) {
+    waktu8266.update(); // Perbarui waktu dari NTP
+    time_t epochTime = waktu8266.getEpochTime();
+    struct tm *ptm = gmtime(&epochTime);
+
+    if (epochTime > 0) {
+      int tanggal = ptm->tm_mday; // Hari dalam bulan
+      int bulanNum = ptm->tm_mon + 1; // Bulan (0 = Januari, +1 untuk array bulan[])
+      int tahun = ptm->tm_year + 1900; // Tahun dimulai dari 1900
+
+      String waktuSekarang = waktu8266.getFormattedTime(); // Format waktu HH:MM:SS
+      String tanggalLengkap = hari[waktu8266.getDay()] + ", " + String(tanggal) + " " + bulan[bulanNum - 1] + " " + String(tahun);
+
+      message += " pada " + tanggalLengkap + " pukul " + waktuSekarang; // Tambahkan tanggal dan waktu ke pesan
+    } else {
+      message += " (Waktu tidak valid)"; // Jika waktu tidak valid
+    }
+
+    WiFiClientSecure client;
+    client.setInsecure(); // Nonaktifkan validasi SSL
+
+    HTTPClient http;
+    String apiUrl = "https://whatsapp.dimensitekno.id/index.php/api/sendMessageTextGroup";
+    String jsonPayload = "{\"instance_key\":\"lycpxsHRuo87\",\"jid\":\"120363372094102935@g.us\",\"message\":\"" + message + "\"}";
+
+    if (http.begin(client, apiUrl)) {
+      http.addHeader("Content-Type", "application/json"); // Header HTTP
+      int httpResponseCode = http.POST(jsonPayload); // Kirim data
+
+      if (httpResponseCode > 0) {
+        Serial.print("HTTP Response code: ");
+        Serial.println(httpResponseCode);
+        Serial.println("Response: " + http.getString());
+      } else {
+        Serial.print("Error sending POST. HTTP Response code: ");
+        Serial.println(httpResponseCode);
+      }
+      http.end();
+    } else {
+      Serial.println("Failed to establish HTTP connection.");
+    }
+  } else {
+    Serial.println("WiFi not connected.");
+  }
+}
+
+// Fungsi untuk menampilkan waktu dan tanggal saat ini
+void displayTime() {
+  if (WiFi.status() == WL_CONNECTED) {
+    waktu8266.update(); // Perbarui waktu dari NTP
+    time_t epochTime = waktu8266.getEpochTime();
+    struct tm *ptm = gmtime(&epochTime);
+
+    if (epochTime > 0) {
+      int tanggal = ptm->tm_mday;
+      int bulanNum = ptm->tm_mon + 1;
+      int tahun = ptm->tm_year + 1900;
+
+      String waktuSekarang = waktu8266.getFormattedTime();
+      String tanggalLengkap = String(tanggal) + " " + bulan[bulanNum - 1] + " " + String(tahun);
+
+      Serial.print("Tanggal: ");
+      Serial.println(tanggalLengkap);
+      Serial.print("Waktu: ");
+      Serial.println(waktuSekarang);
+    } else {
+      Serial.println("NTP time not valid yet.");
+    }
+  } else {
+    Serial.println("WiFi not connected. Cannot update time.");
+  }
+}
+
+// Fungsi untuk mengontrol PIN1 dan PIN2
+void controlPins() {
+  unsigned long currentMillis = millis();
+  
+  // Kontrol LASER
+  if (strcmp(myData.a, "A1") == 0) {
+    if (!isPin1High) { // Jika PIN1 baru saja menjadi HIGH
+      digitalWrite(PIN1, HIGH); // Aktifkan PIN1
+      digitalWrite(PIN3, HIGH);
+      delay(1000);
+      String waktuSekarang = waktu8266.getFormattedTime();
+      sendWhatsAppNotification("Laser Terputus pada " + waktuSekarang);
+      isPin1High = true;
+    }
+  } else if (isPin1High) {
+    digitalWrite(PIN1, LOW); // Matikan PIN1
+    digitalWrite(PIN3, LOW);
+    String waktuSekarang = waktu8266.getFormattedTime();
+    sendWhatsAppNotification("Laser Tersambung pada " + waktuSekarang);
+    isPin1High = false;
+    Serial.println("PIN1 turned OFF");
+  }
+
+  // Kontrol GERBANG 
+  if (strcmp(myData.a, "B1") == 0) {
+    if (!isGateOpen) { // Jika PIN2 baru saja menjadi HIGH
+      digitalWrite(PIN2, HIGH); // Aktifkan PIN2
+      digitalWrite(PIN3, HIGH);
+      delay(1000);
+      digitalWrite(PIN2, LOW); // non aktifkan PIN2
+      String waktuSekarang = waktu8266.getFormattedTime();
+      sendWhatsAppNotification("Gerbang Terbuka pada " + waktuSekarang);
+      digitalWrite(PIN3, LOW);
+      isGateOpen = true;
+      lastMillisPin2 = currentMillis; // Catat waktu aktif PIN2
+      delay(2000);
+    }
+
+    // Matikan PIN2 setelah 2 detik
+    if (currentMillis - lastMillisPin2 > 2000) {
+      digitalWrite(PIN2, LOW); // Matikan PIN2
+      isGateOpen = false;
+      Serial.println("PIN2 turned OFF");
+    }
+  } else if (strcmp(myData.a, "B0") == 0 && isGateOpen) {
+    digitalWrite(PIN2, LOW); // Matikan PIN2
+    digitalWrite(PIN3, LOW);
+    isGateOpen = false;
+    Serial.println("PIN2 turned OFF");
+  }
+}
+
+
+void loop() {
+  controlPins();          // Kontrol PIN berdasarkan data yang diterima
+  ensureWiFiConnected();  // Pastikan Wi-Fi tetap terhubung
+  waktu8266.update();     // Perbarui waktu dari NTP
+  displayTime();          // Tampilkan waktu dan tanggal saat ini
+  delay(1000);
+}

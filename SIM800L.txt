@@ -1,0 +1,154 @@
+#include <SoftwareSerial.h>
+#include <ESP8266WiFi.h> // Library untuk fungsi reset ESP8266
+
+// Pin untuk komunikasi serial dengan SIM800L
+SoftwareSerial sim800l(D1, D2); // D2 (GPIO4 / RX) ke TX SIM800L, D1 (GPIO5 / TX) ke RX SIM800L
+
+String apiUrl = "http://something"; // API URL untuk GET request
+unsigned long previousMillis = 0; // Waktu terakhir API dikirim
+const long interval = 15000;      // Interval pengiriman API dalam milidetik (10 detik)
+
+void setup() {
+  Serial.begin(115200);    // Debug ke Serial Monitor
+  sim800l.begin(9600);
+  delay(13000);            // Tunggu 13 detik untuk SIM800L siap
+
+  Serial.println("Inisialisasi SIM800L...");
+  debugSIM800L();          // Debugging awal untuk memeriksa koneksi SIM800L
+  if (!configureGPRS()) {  // Konfigurasi GPRS dengan APN Telkomsel
+    Serial.println("GPRS tidak berhasil, merestart SIM800L...");
+    restartSIM800L();      // Restart SIM800L jika GPRS gagal
+    debugSIM800L();        // Debugging ulang
+    configureGPRS();       // Coba koneksi GPRS lagi
+  }
+  Serial.println("Selesai!");
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // Periksa apakah interval waktu sudah tercapai
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis; // Reset waktu
+    sendHttpRequest();              // Kirim data HTTP GET
+  }
+}
+
+// Fungsi untuk mengirim perintah AT dan menampilkan proses di Serial Monitor
+void sendCommand(String command, int waitTime) {
+  Serial.print("Mengirim perintah: ");
+  Serial.println(command);   // Menampilkan perintah yang dikirim ke SIM800L
+  sim800l.println(command);  // Mengirim perintah ke SIM800L
+
+  long start = millis();
+  while (sim800l.available() == 0 && millis() - start < waitTime) {
+    // Tunggu sampai respons diterima atau waktu habis
+  }
+
+  if (sim800l.available()) {
+    String response = sim800l.readString();
+    Serial.print("Respons: ");
+    Serial.println(response);  // Menampilkan respons dari SIM800L
+
+    // Periksa untuk berbagai error
+    if (response.indexOf("+CME ERROR: 10") != -1) {
+      Serial.println("Terjadi kesalahan +CME ERROR: 10. Merestart SIM800L...");
+      restartSIM800L();  // Panggil fungsi untuk merestart SIM800L
+    } else if (response.indexOf("+CME ERROR: 3") != -1) {
+      Serial.println("Terjadi kesalahan +CME ERROR: 3. Merestart SIM800L...");
+      restartSIM800L();  // Panggil fungsi untuk merestart SIM800L
+    }
+  } else {
+    Serial.println("Tidak ada respons dari SIM800L");
+    delay(50);  // Menambahkan sedikit waktu tunggu untuk kestabilan
+  }
+}
+
+// Fungsi untuk debugging awal SIM800L
+void debugSIM800L() {
+  sendCommand("AT", 1000);           // Cek koneksi AT
+  delay(500);
+  sendCommand("AT+CMEE=1", 1000);    // Aktifkan pesan error
+  delay(500);
+  sendCommand("AT+IPR?", 1000);      // Cek baud rate SIM800L
+  delay(500);
+  sendCommand("AT+CSQ", 1000);       // Cek kualitas sinyal
+  delay(500);
+  sendCommand("AT+CREG?", 1000);     // Cek status registrasi jaringan
+  delay(500);
+  sendCommand("AT+COPS?", 1000);     // Cek operator jaringan
+  delay(500);
+}
+
+// Fungsi untuk menginisialisasi koneksi GPRS
+bool configureGPRS() {
+  Serial.println("Mengonfigurasi koneksi GPRS...");
+  
+  // Atur tipe koneksi ke GPRS
+  sendCommand("AT+SAPBR=3,1,\"CONTYPE\",\"GPRS\"", 2000);
+  delay(10000);
+  
+  // Atur APN
+  sendCommand("AT+SAPBR=3,1,\"APN\",\"3data\"", 2000); 
+  delay(12000);
+
+  // Aktifkan PDP context
+  sendCommand("AT+CGACT=1,1", 3000);
+  delay(6000);
+
+  // Buka koneksi GPRS
+  sendCommand("AT+SAPBR=1,1", 4000);    
+  delay(6000);
+  
+  // Periksa status koneksi GPRS
+  sendCommand("AT+SAPBR=2,1", 2000);                             
+  delay(10000);
+
+  sendCommand("AT+HTTPINIT", 1000);
+  delay(8000);
+  
+  // Periksa apakah GPRS sudah aktif
+  String response = sim800l.readString();
+
+  if (response.indexOf("OK") == -1 && response != "") {
+    Serial.println("GPRS tidak berhasil terhubung");
+    return false;  // Gagal menghubungkan GPRS
+}
+
+  
+  return true;  // GPRS berhasil terhubung
+}
+
+// Fungsi untuk merestart SIM800L dan Wemos D1 Mini
+void restartSIM800L() {
+  // Restart SIM800L
+  Serial.println("Merestart SIM800L...");
+  pinMode(D3, OUTPUT);      // Set D3 sebagai pin output
+  digitalWrite(D3, LOW);    // Set pin D3 ke LOW (matikan SIM800L) selama 3 detik
+  delay(3000);              // Tunggu selama 3 detik
+  digitalWrite(D3, HIGH);   // Set pin D3 ke HIGH (nyalakan SIM800L kembali)
+  delay(3000);              // Tunggu 5 detik agar SIM800L kembali menyala
+
+  Serial.println("Restart SIM800L selesai.");
+
+  // Restart Wemos D1 Mini
+  Serial.println("Merestart Wemos D1 Mini...");
+  ESP.restart();                     // Perintah software reset untuk Wemos D1 Mini
+}
+
+// Fungsi untuk mengirimkan HTTP GET request
+void sendHttpRequest() {
+  Serial.println("Mengirimkan HTTP GET request...");
+  
+  // Inisialisasi HTTP
+  //sendCommand("AT+HTTPINIT", 1000);
+  
+  // Set parameter untuk HTTP GET
+  sendCommand("AT+HTTPPARA=\"CID\",1", 1000);  // Mengatur parameter koneksi
+  sendCommand("AT+HTTPPARA=\"URL\",\"" + apiUrl + "\"", 1000);  // URL API
+  
+  // Kirim HTTP GET request
+  sendCommand("AT+HTTPACTION=0", 3000);  // 0 untuk GET request
+  // Periksa status koneksi GPRS
+  sendCommand("AT+SAPBR=2,1", 2000);
+}
